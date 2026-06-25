@@ -134,12 +134,15 @@ usage_list() {
 genv list — list variables and secrets in one table
 
 USAGE
-  genv list [-e <env>]
+  genv list [-e <env>] [--full]
 
   -e, --env <name>   Environment to list (default: repository-level)
+      --full         Don't truncate long values to the terminal width
 
 TYPE is "secret" or "var". A secret's value is hidden (write-only); if it has a
 same-named fallback variable, that value shows in FALLBACK (otherwise "-").
+Long values are truncated to fit your terminal; use --full to see them whole.
+Piped or redirected output is never truncated.
 EOF
 }
 
@@ -223,34 +226,36 @@ cmd_var() {
 }
 
 cmd_list() {
-  local e=''
+  local e='' full=''
   while [ $# -gt 0 ]; do
     case "$1" in
       -e|--env)  [ $# -ge 2 ] || { err "list: --env requires a value"; return 2; }; e="$2"; shift 2 ;;
+      --full)    full=1; shift ;;
       -h|--help) usage_list; return 0 ;;
       *)         err "list: unexpected argument '$1'"; return 2 ;;
     esac
   done
   require_gh
 
-  # If an environment was given, verify it exists so we can show a clear message
-  # instead of gh's raw 404.
-  if [ -n "$e" ] && ! gh api "repos/{owner}/{repo}/environments/$e" >/dev/null 2>&1; then
-    local repo; repo="$(gh repo view --json nameWithOwner --jq .nameWithOwner 2>/dev/null || echo "this repository")"
-    err "environment \"$e\" not found in $repo"
-    err "run 'genv list' for repository-level config, or check the environment name"
-    return 1
+  # Read variables/secrets, capturing gh's stderr so we can give a clear message.
+  # A genuine 404 means the environment doesn't exist; anything else (network,
+  # auth) is reported as-is rather than mislabeled "not found".
+  local vars secs rows efile; efile="$(mktemp)"
+  if ! vars="$(gh variable list ${e:+--env "$e"} --json name,value --jq '.[] | "\(.name)\t\(.value)"' 2>"$efile")"; then
+    if [ -n "$e" ] && grep -qiE 'http 404|not found' "$efile"; then
+      local repo; repo="$(gh repo view --json nameWithOwner --jq .nameWithOwner 2>/dev/null || echo "this repository")"
+      err "environment \"$e\" not found in $repo"
+      err "run 'genv list' for repository-level config, or check the environment name"
+    else
+      err "could not read variables: $(tr '\n' ' ' < "$efile" | sed 's/^ *gh: //;s/ *$//')"
+    fi
+    rm -f "$efile"; return 1
   fi
-
-  local vars secs rows
-  if ! vars="$(gh variable list ${e:+--env "$e"} --json name,value --jq '.[] | "\(.name)\t\(.value)"' 2>/dev/null)"; then
-    err "could not read variables (check your gh auth and repo access)"
-    return 1
+  if ! secs="$(gh secret list ${e:+--env "$e"} --json name --jq '.[].name' 2>"$efile")"; then
+    err "could not read secrets: $(tr '\n' ' ' < "$efile" | sed 's/^ *gh: //;s/ *$//')"
+    rm -f "$efile"; return 1
   fi
-  if ! secs="$(gh secret list ${e:+--env "$e"} --json name --jq '.[].name' 2>/dev/null)"; then
-    err "could not read secrets (check your gh auth and repo access)"
-    return 1
-  fi
+  rm -f "$efile"
 
   if [ -n "$e" ]; then echo "Environment: $e"; else echo "Repository-level"; fi
 
@@ -275,11 +280,43 @@ cmd_list() {
     return 0
   fi
 
-  # Render an aligned table (pad each column to its max width).
-  { printf 'NAME\tTYPE\tVALUE\tFALLBACK\n'; printf '%s\n' "$rows"; } | awk -F'\t' '
-    { for (i=1;i<=NF;i++) { cell[NR,i]=$i; if (length($i)>w[i]) w[i]=length($i) }
-      if (NF>nf) nf=NF; n=NR }
+  # Truncate long values only when writing to a terminal and --full wasn't given;
+  # piped/redirected output stays full so scripts and grep/less see everything.
+  local trunc=0 cols=80
+  if [ -z "$full" ] && [ -t 1 ]; then
+    trunc=1; cols="$(tput cols 2>/dev/null || echo 80)"
+  fi
+
+  # Render the table. When truncating, keep NAME/TYPE full and shrink VALUE +
+  # FALLBACK to fit the terminal width, marking clipped values with "…".
+  { printf 'NAME\tTYPE\tVALUE\tFALLBACK\n'; printf '%s\n' "$rows"; } | awk -F'\t' -v trunc="$trunc" -v cols="$cols" '
+    function clip(c,   t,r,L,maxw) {
+      t = tw[c]; maxw = 0
+      for (r=1;r<=n;r++) {
+        L = length(cell[r,c])
+        if (L > t) { cell[r,c] = substr(cell[r,c], 1, t-1) "…"; L = t }
+        if (L > maxw) maxw = L
+      }
+      return maxw
+    }
+    { for (i=1;i<=NF;i++) cell[NR,i]=$i; if (NF>nf) nf=NF; n=NR }
     END {
+      for (r=1;r<=n;r++) for (i=1;i<=nf;i++) { L=length(cell[r,i]); if (L>w[i]) w[i]=L }
+      if (trunc && nf >= 4) {
+        sep = 2*(nf-1)
+        if (w[1]+w[2]+w[3]+w[4]+sep > cols) {
+          budget = cols - w[1] - w[2] - sep
+          if (budget < 8) budget = 8
+          a = w[3]; b = w[4]
+          if (a + b > budget) {
+            half = int(budget/2)
+            if      (a <= half) { tw[3]=a;        tw[4]=budget-a }
+            else if (b <= half) { tw[4]=b;        tw[3]=budget-b }
+            else                { tw[3]=half;     tw[4]=budget-half }
+            w[3] = clip(3); w[4] = clip(4)
+          }
+        }
+      }
       for (r=1;r<=n;r++) {
         out=""
         for (i=1;i<=nf;i++) {
