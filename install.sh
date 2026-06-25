@@ -10,6 +10,16 @@
 
 set -eu
 
+cat <<'BANNER'
+
+   ____ ____  ____ _   __
+  / __ `/ _ \/ __ \ | / /
+ / /_/ /  __/ / / / |/ /
+ \__, /\___/_/ /_/|___/
+/____/
+
+BANNER
+
 REPO="tinloof/genv"
 REF="${GENV_REF:-main}"
 BIN_DIR="${GENV_BIN_DIR:-$HOME/.local/bin}"
