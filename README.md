@@ -14,6 +14,7 @@ and a `bash` shell (on Windows: Git Bash or WSL).
 ## Usage
 
 ```sh
+genv list   [-e <env>]                                   # list variables & secrets in one table
 genv pull   [-e <env>] [-f <file>]                       # variables → dotenv file (default .env)
 genv push   [-e <env>] [-f <file>]                       # dotenv file → variables
 genv var    <NAME> [value] [-e <env>]                    # set one variable

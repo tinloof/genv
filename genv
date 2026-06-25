@@ -43,6 +43,7 @@ COMMANDS
   push     Set GitHub variables from a dotenv file (default: .env)
   var      Set a single GitHub variable
   secret   Set a secret, optionally with a fallback variable
+  list     List variables and secrets in one table
   help     Show this help (also: genv <command> --help)
 
 OPTIONS
@@ -56,6 +57,7 @@ EXAMPLES
   genv var LOG_LEVEL debug -e production
   genv secret API_KEY --fallback sk-dummy -e production   # value read from stdin
   genv secret DEBUG verbose --fallback off                # repo-level, inline value
+  genv list -e production
 
 Wraps the GitHub CLI (gh). Run `gh auth login` if you're not signed in.
 EOF
@@ -124,6 +126,20 @@ USAGE
 EXAMPLES
   genv var LOG_LEVEL debug
   genv var API_URL https://api.example.com -e production
+EOF
+}
+
+usage_list() {
+  cat <<'EOF'
+genv list — list variables and secrets in one table
+
+USAGE
+  genv list [-e <env>]
+
+  -e, --env <name>   Environment to list (default: repository-level)
+
+TYPE is "secret" or "var". A secret's value is hidden (write-only); if it has a
+same-named fallback variable, that value shows in FALLBACK (otherwise "-").
 EOF
 }
 
@@ -206,6 +222,76 @@ cmd_var() {
   printf '✓ set variable %s%s\n' "$n" "${e:+ (env $e)}"
 }
 
+cmd_list() {
+  local e=''
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      -e|--env)  [ $# -ge 2 ] || { err "list: --env requires a value"; return 2; }; e="$2"; shift 2 ;;
+      -h|--help) usage_list; return 0 ;;
+      *)         err "list: unexpected argument '$1'"; return 2 ;;
+    esac
+  done
+  require_gh
+
+  # If an environment was given, verify it exists so we can show a clear message
+  # instead of gh's raw 404.
+  if [ -n "$e" ] && ! gh api "repos/{owner}/{repo}/environments/$e" >/dev/null 2>&1; then
+    local repo; repo="$(gh repo view --json nameWithOwner --jq .nameWithOwner 2>/dev/null || echo "this repository")"
+    err "environment \"$e\" not found in $repo"
+    err "run 'genv list' for repository-level config, or check the environment name"
+    return 1
+  fi
+
+  local vars secs rows
+  if ! vars="$(gh variable list ${e:+--env "$e"} --json name,value --jq '.[] | "\(.name)\t\(.value)"' 2>/dev/null)"; then
+    err "could not read variables (check your gh auth and repo access)"
+    return 1
+  fi
+  if ! secs="$(gh secret list ${e:+--env "$e"} --json name --jq '.[].name' 2>/dev/null)"; then
+    err "could not read secrets (check your gh auth and repo access)"
+    return 1
+  fi
+
+  if [ -n "$e" ]; then echo "Environment: $e"; else echo "Repository-level"; fi
+
+  # Tag each line (S=secret name, V=variable name+value), then merge by name:
+  # a secret folds in its same-named variable as the fallback.
+  rows="$(
+    { printf '%s\n' "$secs" | awk 'NF{print "S\t"$0}'
+      printf '%s\n' "$vars" | awk 'NF{print "V\t"$0}'
+    } | awk -F'\t' '
+      $1=="V"{ val[$2]=$3; isvar[$2]=1; name[$2]=1 }
+      $1=="S"{ issec[$2]=1; name[$2]=1 }
+      END{
+        for (k in name) {
+          if (issec[k]) { fb=(isvar[k] ? val[k] : "-"); print k"\tsecret\t(hidden)\t"fb }
+          else          { print k"\tvar\t"val[k]"\t-" }
+        }
+      }' | LC_ALL=C sort -f
+  )"
+
+  if [ -z "$rows" ]; then
+    echo "(no variables or secrets)"
+    return 0
+  fi
+
+  # Render an aligned table (pad each column to its max width).
+  { printf 'NAME\tTYPE\tVALUE\tFALLBACK\n'; printf '%s\n' "$rows"; } | awk -F'\t' '
+    { for (i=1;i<=NF;i++) { cell[NR,i]=$i; if (length($i)>w[i]) w[i]=length($i) }
+      if (NF>nf) nf=NF; n=NR }
+    END {
+      for (r=1;r<=n;r++) {
+        out=""
+        for (i=1;i<=nf;i++) {
+          s=cell[r,i]; pad=w[i]-length(s)
+          while (pad-- > 0) s=s" "
+          out=out s (i<nf ? "  " : "")
+        }
+        sub(/[ ]+$/,"",out); print out
+      }
+    }'
+}
+
 if [ $# -eq 0 ]; then usage; exit 0; fi
 cmd="$1"; shift
 case "$cmd" in
@@ -213,6 +299,7 @@ case "$cmd" in
   push)                 cmd_push "$@" ;;
   var|variable)         cmd_var "$@" ;;
   secret)               cmd_secret "$@" ;;
+  list|ls)              cmd_list "$@" ;;
   help|-h|--help)       usage ;;
   version|--version)    printf 'genv %s\n' "$VERSION" ;;
   *)                    err "unknown command '$cmd' (try: genv --help)"; exit 2 ;;
