@@ -5,8 +5,12 @@ A focused GitHub CLI wrapper for managing a repo's variables and secrets.
 ## Install
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/tinloof/genv/main/install.sh | sh
+curl -fsSL https://genv.tinloof.com/install.sh | sh
 ```
+
+> `genv.tinloof.com` is a Cloudflare redirect to GitHub raw. The installer also falls
+> back to GitHub raw automatically, so this works even before the redirect is set up:
+> `curl -fsSL https://raw.githubusercontent.com/tinloof/genv/main/install.sh | sh`
 
 This downloads `genv` into `~/.local/bin` (override with `GENV_BIN_DIR`). If that
 directory isn't on your `PATH`, the installer tells you the line to add.
