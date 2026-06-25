@@ -1,7 +1,6 @@
 # genv
 
-A focused GitHub CLI wrapper for managing a repo's **GitHub Actions configuration**
-— variables and secrets — without the noise of all of `gh`'s other commands.
+A focused GitHub CLI wrapper for managing a repo's variables and secrets.
 
 ## Install
 
