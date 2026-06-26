@@ -43,6 +43,7 @@ COMMANDS
   push     Set GitHub variables from a dotenv file (default: .env)
   var      Set a single GitHub variable
   secret   Set a secret, optionally with a fallback variable
+  delete   Delete a variable and/or secret
   list     List variables and secrets in one table
   help     Show this help (also: genv <command> --help)
 
@@ -58,6 +59,7 @@ EXAMPLES
   genv secret API_KEY --fallback sk-dummy -e production   # value read from stdin
   genv secret DEBUG verbose --fallback off                # repo-level, inline value
   genv list -e production
+  genv delete OLD_TOKEN -e production
 
 Wraps the GitHub CLI (gh). Run `gh auth login` if you're not signed in.
 EOF
@@ -143,6 +145,28 @@ TYPE is "secret" or "var". A secret's value is hidden (write-only); if it has a
 same-named fallback variable, that value shows in FALLBACK (otherwise "-").
 Long values are truncated to fit your terminal; use --full to see them whole.
 Piped or redirected output is never truncated.
+EOF
+}
+
+usage_delete() {
+  cat <<'EOF'
+genv delete — delete a variable and/or secret by name
+
+USAGE
+  genv delete <NAME> [-e <env>] [--secret | --var]
+
+  <NAME>             Name to delete
+  -e, --env <name>   Environment (default: repository-level)
+      --secret       Delete only the secret
+      --var          Delete only the variable
+
+With neither flag, deletes BOTH the secret and the same-named (fallback)
+variable, whichever exist. Deletion is permanent.
+
+EXAMPLES
+  genv delete API_KEY -e production     # secret + its fallback variable
+  genv delete LOG_LEVEL --var           # just the variable
+  genv delete OLD_TOKEN --secret        # just the secret
 EOF
 }
 
@@ -329,6 +353,70 @@ cmd_list() {
     }'
 }
 
+cmd_delete() {
+  local n='' e='' want_secret='' want_var=''
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      -e|--env)         [ $# -ge 2 ] || { err "delete: --env requires a value"; return 2; }; e="$2"; shift 2 ;;
+      --secret)         want_secret=1; shift ;;
+      --var|--variable) want_var=1; shift ;;
+      -h|--help)        usage_delete; return 0 ;;
+      -*)               err "delete: unknown option '$1'"; return 2 ;;
+      *)                if [ -z "$n" ]; then n="$1"; shift; else err "delete: unexpected argument '$1'"; return 2; fi ;;
+    esac
+  done
+  [ -n "$n" ] || { err "delete: missing NAME"; echo >&2; usage_delete >&2; return 2; }
+  require_gh
+
+  # With no scope flag, target both the secret and the same-named variable.
+  if [ -z "$want_secret" ] && [ -z "$want_var" ]; then want_secret=1; want_var=1; fi
+
+  # Find out what exists so we delete precisely and report clearly. A genuine 404
+  # means the environment is missing; other failures are surfaced as-is.
+  local efile vlist slist; efile="$(mktemp)"
+  if ! vlist="$(gh variable list ${e:+--env "$e"} --json name --jq '.[].name' 2>"$efile")"; then
+    if [ -n "$e" ] && grep -qiE 'http 404|not found' "$efile"; then
+      local repo; repo="$(gh repo view --json nameWithOwner --jq .nameWithOwner 2>/dev/null || echo "this repository")"
+      err "environment \"$e\" not found in $repo"
+    else
+      err "could not read variables: $(tr '\n' ' ' < "$efile" | sed 's/^ *gh: //;s/ *$//')"
+    fi
+    rm -f "$efile"; return 1
+  fi
+  if ! slist="$(gh secret list ${e:+--env "$e"} --json name --jq '.[].name' 2>"$efile")"; then
+    err "could not read secrets: $(tr '\n' ' ' < "$efile" | sed 's/^ *gh: //;s/ *$//')"
+    rm -f "$efile"; return 1
+  fi
+  rm -f "$efile"
+
+  local has_var='' has_sec=''
+  if printf '%s\n' "$vlist" | grep -qxF "$n"; then has_var=1; fi
+  if printf '%s\n' "$slist" | grep -qxF "$n"; then has_sec=1; fi
+
+  local del_var='' del_sec=''
+  if [ -n "$want_var" ]    && [ -n "$has_var" ]; then del_var=1; fi
+  if [ -n "$want_secret" ] && [ -n "$has_sec" ]; then del_sec=1; fi
+
+  if [ -z "$del_var" ] && [ -z "$del_sec" ]; then
+    if   [ -n "$want_var" ] && [ -z "$want_secret" ]; then err "no variable named \"$n\"${e:+ in env $e}"
+    elif [ -n "$want_secret" ] && [ -z "$want_var" ]; then err "no secret named \"$n\"${e:+ in env $e}"
+    else err "nothing named \"$n\"${e:+ in env $e} — no variable or secret to delete"
+    fi
+    return 1
+  fi
+
+  local rc=0
+  if [ -n "$del_sec" ]; then
+    if gh secret delete "$n" ${e:+--env "$e"} >/dev/null 2>&1; then echo "✓ deleted secret $n${e:+ (env $e)}"
+    else err "failed to delete secret $n"; rc=1; fi
+  fi
+  if [ -n "$del_var" ]; then
+    if gh variable delete "$n" ${e:+--env "$e"} >/dev/null 2>&1; then echo "✓ deleted variable $n${e:+ (env $e)}"
+    else err "failed to delete variable $n"; rc=1; fi
+  fi
+  return $rc
+}
+
 if [ $# -eq 0 ]; then usage; exit 0; fi
 cmd="$1"; shift
 case "$cmd" in
@@ -337,6 +425,7 @@ case "$cmd" in
   var|variable)         cmd_var "$@" ;;
   secret)               cmd_secret "$@" ;;
   list|ls)              cmd_list "$@" ;;
+  delete|rm)            cmd_delete "$@" ;;
   help|-h|--help)       usage ;;
   version|--version)    printf 'genv %s\n' "$VERSION" ;;
   *)                    err "unknown command '$cmd' (try: genv --help)"; exit 2 ;;

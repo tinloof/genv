@@ -19,6 +19,7 @@ genv pull   [-e <env>] [-f <file>]                       # variables → dotenv 
 genv push   [-e <env>] [-f <file>]                       # dotenv file → variables
 genv var    <NAME> [value] [-e <env>]                    # set one variable
 genv secret <NAME> [value] [--fallback <v>] [-e <env>]   # set a secret (+ optional fallback variable)
+genv delete <NAME> [-e <env>] [--secret | --var]         # delete a variable and/or secret
 ```
 
 No `-e` targets repo-level config; `-e <name>` targets an environment (created if missing).
